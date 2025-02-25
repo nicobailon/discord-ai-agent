@@ -1,0 +1,56 @@
+Before diving into the best practices, please note that you may need to adapt the globs depending on your specific project structure.
+
+---
+name: discordjs-best-practices.mdc
+description: Best practices for using Discord.js in bot development
+globs: **/*.{ts,js}
+---
+
+- Use `Intents` correctly to subscribe to necessary events
+- Implement proper error handling and logging
+- Utilize `Collection` for efficient data management
+- Leverage `Discord.js` sharding for large-scale bots
+
+---
+name: itty-router-best-practices.mdc
+description: Best practices for routing with Itty Router in Cloudflare Workers
+globs: **/*.{ts,js}
+---
+
+- Use route parameters for dynamic routing
+- Implement proper error handling middleware
+- Utilize `Router.handle` for consistent request handling
+- Keep routes organized and modular
+
+---
+name: langchain-best-practices.mdc
+description: Best practices for using LangChain in AI applications
+globs: **/*.{ts,js}
+---
+
+- Use appropriate `LLM` models for your use case
+- Implement proper prompt engineering techniques
+- Utilize `Chains` for complex task orchestration
+- Ensure proper error handling and retries for API calls
+
+---
+name: typescript-best-practices.mdc
+description: TypeScript coding standards and type safety guidelines
+globs: **/*.{ts}
+---
+
+- Use strict null checks
+- Prefer interface over type when possible
+- Use type guards and assertions for runtime type checking
+- Implement proper type inference to reduce explicit type annotations
+
+---
+name: cloudflare-workers-best-practices.mdc
+description: Best practices for developing with Cloudflare Workers
+globs: **/*.{ts,js}
+---
+
+- Optimize cold start times by minimizing dependencies
+- Use `kv` namespaces for efficient data storage
+- Implement proper caching strategies
+- Utilize `wrangler` for local development and testing

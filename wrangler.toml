@@ -1,0 +1,33 @@
+name = "discord-ai-agent"
+main = "dist/index.js"
+compatibility_date = "2025-02-24"
+
+[durable_objects]
+bindings = [
+  { name = "CONVERSATION_MEMORY", class_name = "ConversationMemory" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["ConversationMemory"]
+
+[[vectorize]]
+binding = "VECTORIZE_INDEX"
+index_name = "discord-conversation-memory"
+preset = "@cf/baai/bge-small-en-v1.5"
+
+[ai]
+binding = "AI"
+
+[vars]
+DISCORD_PUBLIC_KEY = ""
+DISCORD_BOT_TOKEN = ""
+PERPLEXITY_API_KEY = ""
+FAL_API_KEY = ""
+GEMINI_API_KEY = ""
+
+# Discord Gateway Intents
+# These are used when registering the bot with Discord
+# Required intents for message events: GUILDS, GUILD_MESSAGES, MESSAGE_CONTENT
+[discord]
+intents = ["GUILDS", "GUILD_MESSAGES", "MESSAGE_CONTENT", "DIRECT_MESSAGES"] 

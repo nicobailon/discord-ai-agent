@@ -1,0 +1,29 @@
+{
+  "name": "discord-ai-agent",
+  "version": "1.0.0",
+  "description": "Discord bot with AI capabilities and enhanced memory using Cloudflare Workers",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "node scripts/build.js",
+    "deploy": "npm run build && wrangler deploy",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "type-check": "tsc --noEmit",
+    "update-avatar": "node scripts/update-avatar.js"
+  },
+  "dependencies": {
+    "discord-interactions": "^3.4.0",
+    "discord.js": "^14.18.0",
+    "itty-router": "^4.0.27",
+    "langchain": "^0.1.17"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250224.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^20.17.19",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.28.0"
+  },
+  "author": "",
+  "license": "MIT"
+}
