@@ -7,6 +7,13 @@ import { GeminiRequestPayload, GeminiResponse } from '../types';
 import { getSystemPrompt } from '../config/system-prompt';
 import { MCPService } from '../mcp';
 import { MCPResponse } from '../types/mcp';
+import { 
+  ApiError, 
+  handleApiError, 
+  logError, 
+  retryWithBackoff, 
+  parseApiErrorResponse 
+} from '../utils/error-handler';
 
 // Global reference to the MCP service
 let mcpService: MCPService;
@@ -147,20 +154,22 @@ export async function callGeminiAPI(prompt: string, context: string, apiKey: str
       ];
     }
     
-    // Make the API request
-    const response = await fetch(`${endpoint}?key=${apiKey}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-    
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error('Gemini API error:', errorData);
-      return `Sorry, I encountered an error while processing your request. (Error: ${response.status})`;
-    }
+    // Make the API request with retry logic
+    const response = await retryWithBackoff(async () => {
+      const res = await fetch(`${endpoint}?key=${apiKey}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      
+      if (!res.ok) {
+        throw await parseApiErrorResponse(res);
+      }
+      
+      return res;
+    }, 2); // Retry up to 2 times (3 attempts total)
     
     const data = await response.json() as GeminiResponse;
     
@@ -174,22 +183,38 @@ export async function callGeminiAPI(prompt: string, context: string, apiKey: str
       const toolCalls = data.candidates[0].content.parts.filter(part => part.functionCall);
       
       if (toolCalls.length > 0) {
-        // Process tool calls
-        const results = await processToolCalls(toolCalls, apiKey);
-        
-        // Generate a follow-up response with the tool results
-        return await generateFollowUpResponse(prompt, context, results, apiKey);
+        try {
+          // Process tool calls
+          const results = await processToolCalls(toolCalls, apiKey);
+          
+          // Generate a follow-up response with the tool results
+          return await generateFollowUpResponse(prompt, context, results, apiKey);
+        } catch (toolError) {
+          logError('Gemini', 'processing tool calls', toolError);
+          return `I attempted to use tools to answer your question but encountered an issue. Let me try a different approach.\n\n${data.candidates[0].content.parts[0].text || "I couldn't complete the tool operation. Please try rephrasing your question."}`;
+        }
       }
       
       // Return the text response if no tool calls
-      return data.candidates[0].content.parts[0].text;
+      if (data.candidates[0].content.parts[0].text) {
+        return data.candidates[0].content.parts[0].text;
+      } else {
+        throw new Error('Unexpected response format: Missing text in response');
+      }
     } else {
-      console.error('Unexpected Gemini API response structure:', data);
-      return "Sorry, I couldn't generate a response at this time.";
+      throw new Error('Unexpected response format: Missing content in response');
     }
   } catch (error) {
-    console.error('Error calling Gemini API:', error);
-    return "Sorry, there was an error processing your request.";
+    logError('Gemini', 'generating response', error, { promptLength: prompt.length });
+    
+    // Provide a user-friendly error message
+    if (error instanceof ApiError && error.status === 429) {
+      return "Sorry, I've reached my API rate limit. Please try again in a few moments.";
+    } else if (error instanceof ApiError && error.status >= 500) {
+      return "Sorry, the Gemini API is experiencing issues. Please try again later.";
+    }
+    
+    return "Sorry, I encountered an issue while processing your request. Please try again or rephrase your question.";
   }
 }
 
@@ -208,30 +233,51 @@ async function processToolCalls(toolCalls: any[], apiKey: string): Promise<any> 
     if (!functionCall) continue;
     
     const functionName = functionCall.name;
-    const args = JSON.parse(functionCall.args);
     
-    if (functionName === 'search_web') {
-      // Implement web search functionality
-      const searchResult = await performWebSearch(args.query);
+    try {
+      // Safely parse function arguments
+      let args;
+      try {
+        args = JSON.parse(functionCall.args);
+      } catch (parseError) {
+        logError('Gemini', `parsing arguments for ${functionName}`, parseError, { args: functionCall.args });
+        throw new Error(`Invalid arguments for ${functionName}`);
+      }
+      
+      // Call the appropriate function based on the function name
+      if (functionName === 'search_web') {
+        // Implement web search functionality
+        const searchResult = await performWebSearch(args.query);
+        results.push({
+          tool: 'search_web',
+          result: searchResult
+        });
+      } else if (functionName === 'generate_image') {
+        // Implement image generation functionality
+        const imageResult = await generateImage(args.prompt, args.quality);
+        results.push({
+          tool: 'generate_image',
+          result: imageResult
+        });
+      } else if (functionName === 'query_mcp') {
+        // Implement MCP query functionality
+        // Ensure context is always a string
+        const contextStr = args.context || '';
+        const mcpResult = await queryMCP(args.query, contextStr);
+        results.push({
+          tool: 'query_mcp',
+          result: mcpResult
+        });
+      } else {
+        // Handle unknown function calls
+        throw new Error(`Unknown function call: ${functionName}`);
+      }
+    } catch (error) {
+      logError('Gemini', `executing tool call ${functionName}`, error);
       results.push({
-        tool: 'search_web',
-        result: searchResult
-      });
-    } else if (functionName === 'generate_image') {
-      // Implement image generation functionality
-      const imageResult = await generateImage(args.prompt, args.quality);
-      results.push({
-        tool: 'generate_image',
-        result: imageResult
-      });
-    } else if (functionName === 'query_mcp') {
-      // Implement MCP query functionality
-      // Ensure context is always a string
-      const contextStr = args.context || '';
-      const mcpResult = await queryMCP(args.query, contextStr);
-      results.push({
-        tool: 'query_mcp',
-        result: mcpResult
+        tool: functionName,
+        error: true,
+        result: `Failed to execute ${functionName}: ${error instanceof Error ? error.message : String(error)}`
       });
     }
   }
@@ -270,10 +316,14 @@ async function queryMCP(query: string, context: string): Promise<string> {
         };
         
         // Send the request directly to avoid type issues
-        const response = await mcpService.getClient().sendRequest(serverId, request);
+        const response = await retryWithBackoff(
+          async () => await mcpService.getClient().sendRequest(serverId, request),
+          1 // Retry once (2 attempts total)
+        );
+        
         responses[serverId] = response;
       } catch (error) {
-        console.error(`Error querying MCP server ${serverId}:`, error);
+        logError('MCP', `querying server ${serverId}`, error, { query });
         responses[serverId] = {
           text: `Error querying server: ${error instanceof Error ? error.message : String(error)}`,
           error: `Error: ${error instanceof Error ? error.message : String(error)}`
@@ -284,7 +334,7 @@ async function queryMCP(query: string, context: string): Promise<string> {
     // Format the responses for Discord
     return mcpService.formatResponsesForDiscord(responses);
   } catch (error) {
-    console.error('Error querying MCP servers:', error);
+    logError('MCP', 'querying servers', error, { query });
     return "Sorry, there was an error querying MCP servers.";
   }
 }
@@ -352,35 +402,50 @@ async function generateFollowUpResponse(prompt: string, context: string, toolRes
       }
     };
     
-    // Make the API request
-    const response = await fetch(`${endpoint}?key=${apiKey}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
+    // Make the API request with retry logic
+    const response = await retryWithBackoff(async () => {
+      const res = await fetch(`${endpoint}?key=${apiKey}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      
+      if (!res.ok) {
+        throw await parseApiErrorResponse(res);
+      }
+      
+      return res;
     });
-    
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error('Gemini API error in follow-up:', errorData);
-      return `Sorry, I encountered an error while processing the tool results. (Error: ${response.status})`;
-    }
     
     const data = await response.json() as GeminiResponse;
     
     if (data.candidates && data.candidates.length > 0 && 
         data.candidates[0].content && 
         data.candidates[0].content.parts && 
-        data.candidates[0].content.parts.length > 0) {
+        data.candidates[0].content.parts.length > 0 &&
+        data.candidates[0].content.parts[0].text) {
       return data.candidates[0].content.parts[0].text;
     } else {
-      console.error('Unexpected Gemini API response structure in follow-up:', data);
-      return "Sorry, I couldn't generate a follow-up response at this time.";
+      throw new Error('Unexpected response format in follow-up');
     }
   } catch (error) {
-    console.error('Error generating follow-up response:', error);
-    return "Sorry, there was an error processing the tool results.";
+    logError('Gemini', 'generating follow-up response', error);
+    
+    // Create a fallback response that includes as much tool data as possible
+    let fallbackResponse = "I found some information but had trouble processing it completely. Here's what I found:\n\n";
+    
+    if (Array.isArray(toolResults)) {
+      toolResults.forEach(result => {
+        if (!result.error && result.result) {
+          fallbackResponse += `From ${result.tool}: ${result.result}\n\n`;
+        }
+      });
+    }
+    
+    fallbackResponse += "I apologize for not being able to provide a more comprehensive answer.";
+    return fallbackResponse;
   }
 }
 
@@ -400,7 +465,7 @@ async function performWebSearch(query: string): Promise<string> {
            `3. Example result 3 - https://example.com/result3\n\n` +
            `Note: These are placeholder results. Implement actual web search functionality.`;
   } catch (error) {
-    console.error('Error performing web search:', error);
+    logError('Web Search', 'performing search', error, { query });
     return `Error performing web search for "${query}".`;
   }
 }
@@ -420,7 +485,7 @@ async function generateImage(prompt: string, quality: string): Promise<string> {
            `Image URL: https://example.com/generated-image.jpg\n\n` +
            `Note: This is a placeholder result. Implement actual image generation functionality.`;
   } catch (error) {
-    console.error('Error generating image:', error);
+    logError('Image Generation', 'generating image', error, { prompt, quality });
     return `Error generating image for "${prompt}".`;
   }
-} 
+}

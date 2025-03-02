@@ -3,7 +3,17 @@
  * Handles interactions with Perplexity API for web search and information retrieval
  */
 
-import { ApiResponse, PerplexityResult, PerplexitySearchParams, PerplexityResearchParams } from '../types';
+import { 
+  ApiResponse, 
+  PerplexityResult, 
+  PerplexitySearchParams, 
+  PerplexityResearchParams 
+} from '../types';
+import { 
+  handleApiError, 
+  retryWithBackoff, 
+  parseApiErrorResponse 
+} from '../utils/error-handler';
 
 /**
  * Perform a standard search using Perplexity API
@@ -20,23 +30,22 @@ export async function performSearch(query: string, apiKey: string): Promise<ApiR
       highlight_citations: true
     };
 
-    const response = await fetch('https://api.perplexity.ai/search', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(searchParams)
-    });
+    const response = await retryWithBackoff(async () => {
+      const res = await fetch('https://api.perplexity.ai/search', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(searchParams)
+      });
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error('Perplexity API error:', errorData);
-      return {
-        error: true,
-        message: `Error: ${response.status} - ${response.statusText}`
-      };
-    }
+      if (!res.ok) {
+        throw await parseApiErrorResponse(res);
+      }
+      
+      return res;
+    });
 
     const data = await response.json() as PerplexityResult;
     return {
@@ -44,11 +53,12 @@ export async function performSearch(query: string, apiKey: string): Promise<ApiR
       data: data
     };
   } catch (error) {
-    console.error('Error calling Perplexity API:', error);
-    return {
-      error: true,
-      message: 'An error occurred while processing your search request.'
-    };
+    return handleApiError<PerplexityResult>(
+      'Perplexity', 
+      'performing search',
+      error, 
+      { queryLength: query.length }
+    );
   }
 }
 
@@ -68,35 +78,41 @@ export async function performDeepResearch(query: string, apiKey: string): Promis
       highlight_citations: true
     };
 
-    const response = await fetch('https://api.perplexity.ai/research', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(researchParams)
+    const response = await retryWithBackoff(async () => {
+      const res = await fetch('https://api.perplexity.ai/research', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(researchParams)
+      });
+
+      if (!res.ok) {
+        throw await parseApiErrorResponse(res);
+      }
+      
+      return res;
     });
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error('Perplexity API error:', errorData);
-      return {
-        error: true,
-        message: `Error: ${response.status} - ${response.statusText}`
-      };
-    }
-
     const data = await response.json() as PerplexityResult;
+    
+    // Validate the response data
+    if (!data.answer || typeof data.answer !== 'string') {
+      throw new Error('Invalid or empty response from Perplexity API');
+    }
+    
     return {
       error: false,
       data: data
     };
   } catch (error) {
-    console.error('Error calling Perplexity API:', error);
-    return {
-      error: true,
-      message: 'An error occurred while processing your research request.'
-    };
+    return handleApiError<PerplexityResult>(
+      'Perplexity', 
+      'conducting research',
+      error,
+      { queryLength: query.length }
+    );
   }
 }
 
@@ -116,12 +132,19 @@ export function formatSearchResults(results: ApiResponse<PerplexityResult>): str
 
   const { answer, citations, query } = results.data;
   
+  if (!answer || typeof answer !== 'string') {
+    return '**Search Error**: Invalid or missing answer in the response.';
+  }
+  
   let formattedResult = `**Search Results for**: ${query}\n\n${answer}\n\n`;
   
-  if (citations && citations.length > 0) {
+  if (citations && Array.isArray(citations) && citations.length > 0) {
     formattedResult += '**Sources**:\n';
     citations.forEach((citation, index) => {
-      formattedResult += `${index + 1}. [${citation.title}](${citation.url})\n`;
+      // Validate citation format before including
+      if (citation && citation.title && citation.url) {
+        formattedResult += `${index + 1}. [${citation.title}](${citation.url})\n`;
+      }
     });
   }
   
@@ -144,14 +167,27 @@ export function formatResearchResults(results: ApiResponse<PerplexityResult>): s
 
   const { answer, citations, query } = results.data;
   
+  if (!answer || typeof answer !== 'string') {
+    return '**Research Error**: Invalid or missing answer in the response.';
+  }
+  
   let formattedResult = `**Deep Research Results for**: ${query}\n\n${answer}\n\n`;
   
-  if (citations && citations.length > 0) {
+  if (citations && Array.isArray(citations) && citations.length > 0) {
     formattedResult += '**Sources**:\n';
     citations.forEach((citation, index) => {
-      formattedResult += `${index + 1}. [${citation.title}](${citation.url})\n`;
+      // Validate citation format before including
+      if (citation && citation.title && citation.url) {
+        formattedResult += `${index + 1}. [${citation.title}](${citation.url})\n`;
+      }
     });
   }
   
+  // Truncate if the message is too long for Discord
+  if (formattedResult.length > 2000) {
+    const truncationMessage = '\n\n... (results truncated due to Discord message size limits)';
+    formattedResult = formattedResult.substring(0, 2000 - truncationMessage.length) + truncationMessage;
+  }
+  
   return formattedResult;
-} 
+}
