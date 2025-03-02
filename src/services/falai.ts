@@ -4,6 +4,12 @@
  */
 
 import { ApiResponse, FalImageGenerationParams, FalImageResult } from '../types';
+import { 
+  handleApiError, 
+  retryWithBackoff, 
+  parseApiErrorResponse, 
+  logError 
+} from '../utils/error-handler';
 
 /**
  * Generate an image using fal.ai's Stable Diffusion 3.5 Large model
@@ -78,24 +84,23 @@ async function generateImage(prompt: string, model: 'sd-3.5-large' | 'sd-3.5-tur
         throw new Error(`Unsupported model: ${model}`);
     }
     
-    // Make the API request
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(payload)
-    });
-    
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error('fal.ai API error:', errorData);
-      return {
-        error: true,
-        message: `Error: ${response.status} - ${response.statusText}`
-      };
-    }
+    // Make the API request with retry logic
+    const response = await retryWithBackoff(async () => {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(payload)
+      });
+      
+      if (!res.ok) {
+        throw await parseApiErrorResponse(res);
+      }
+      
+      return res;
+    }, 2); // Retry up to 2 times (3 attempts total)
     
     const data = await response.json() as FalImageResult;
     return {
@@ -103,12 +108,34 @@ async function generateImage(prompt: string, model: 'sd-3.5-large' | 'sd-3.5-tur
       data: data
     };
   } catch (error) {
-    console.error('Error calling fal.ai API:', error);
-    return {
-      error: true,
-      message: 'An error occurred while generating the image.'
-    };
+    return handleApiError<FalImageResult>(
+      'fal.ai', 
+      'generating image', 
+      error,
+      { model, promptLength: prompt.length }
+    );
   }
+}
+
+/**
+ * Validate the image URL from the fal.ai response
+ * @param {FalImageResult} data - The image generation result
+ * @returns {string | null} - The validated image URL or null if not found
+ */
+function validateImageUrl(data: FalImageResult): string | null {
+  if (!data) return null;
+  
+  // Extract the image URL from the response
+  // Note: The actual response structure may vary based on the fal.ai API
+  const imageUrl = data.images?.[0]?.url || data.image?.url || data.url;
+  
+  // Validate that the URL is properly formed
+  if (typeof imageUrl !== 'string' || !imageUrl.startsWith('http')) {
+    logError('fal.ai', 'validating image URL', new Error('Invalid image URL format'), { data });
+    return null;
+  }
+  
+  return imageUrl;
 }
 
 /**
@@ -130,13 +157,11 @@ export function formatImageResponse(result: ApiResponse<FalImageResult>, prompt:
     };
   }
   
-  // Extract the image URL from the response
-  // Note: The actual response structure may vary based on the fal.ai API
-  const imageUrl = result.data.images?.[0]?.url || result.data.image?.url || result.data.url;
+  const imageUrl = validateImageUrl(result.data);
   
   if (!imageUrl) {
     return {
-      content: "**Error**: Could not extract image URL from the response."
+      content: "**Error**: Could not extract a valid image URL from the response."
     };
   }
   
@@ -151,4 +176,4 @@ export function formatImageResponse(result: ApiResponse<FalImageResult>, prompt:
       }
     ]
   };
-} 
+}
